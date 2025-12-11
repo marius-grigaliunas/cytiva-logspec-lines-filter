@@ -7,7 +7,8 @@ export interface DataRow {
   country: string;
   customer: string;
   outboundPendingLines: string;
-  [key: string]: string; // Allow access to other columns by name
+  nextOutboundStep?: string;
+  [key: string]: string | undefined; // Allow access to other columns by name
 }
 
 /**
@@ -51,6 +52,7 @@ export function parseExcelFile(file: File): Promise<DataRow[]> {
         const countryIdx = findColumnIndex(headers, ['Country']);
         const customerIdx = findColumnIndex(headers, ['Customer']);
         const outboundPendingIdx = findColumnIndex(headers, ['Outbound Pending Lines', 'Outbound Pending']);
+        const nextOutboundStepIdx = findColumnIndex(headers, ['Next Outbound Step']);
 
         if (deliveryIdx === -1 || shipMethodIdx === -1 || countryIdx === -1) {
           reject(new Error('Required columns not found. Expected: Delivery, Ship Method, Country'));
@@ -60,13 +62,14 @@ export function parseExcelFile(file: File): Promise<DataRow[]> {
         // Map rows to structured data
         const parsedRows: DataRow[] = rows
           .filter(row => row && row.length > 0) // Skip empty rows
-          .map((row, index) => {
+          .map((row) => {
             const dataRow: DataRow = {
               delivery: getCellValue(row, deliveryIdx),
               shipMethod: getCellValue(row, shipMethodIdx),
               country: getCellValue(row, countryIdx),
               customer: getCellValue(row, customerIdx) || '',
               outboundPendingLines: getCellValue(row, outboundPendingIdx) || '0',
+              nextOutboundStep: nextOutboundStepIdx >= 0 ? getCellValue(row, nextOutboundStepIdx) : undefined,
             };
 
             // Also store all columns by header name for potential future use
