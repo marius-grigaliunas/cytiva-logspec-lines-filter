@@ -153,7 +153,7 @@ function App() {
         </section>
 
         {filteredRows.length > 0 && (
-          <section className="mt-4">
+          <section className="fixed inset-0 bg-white dark:bg-gray-800 z-50 overflow-hidden" style={{ top: 0, left: 0, right: 0, bottom: 0 }}>
             <ResultsTable data={filteredRows} totalCount={allRows.length} />
           </section>
         )}

@@ -21,6 +21,7 @@ const AVAILABLE_COLUMNS: ColumnConfig[] = [
   { key: 'country', label: 'Country', isDefault: true },
   { key: 'customer', label: 'Customer', isDefault: true },
   { key: 'outboundPendingLines', label: 'Pending Lines', isDefault: true },
+  { key: 'SSD Due Category', label: 'SSD Due Category', isDefault: true },
   { key: 'nextOutboundStep', label: 'Next Outbound Step', isDefault: false },
   { key: 'Next Outbound Step', label: 'Next Outbound Step (Raw)', isDefault: false },
   { key: 'Order', label: 'Order', isDefault: false },
@@ -206,6 +207,48 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
   const [columnOrder, setColumnOrder] = useState<string[]>([]);
   const [draggedColumn, setDraggedColumn] = useState<string | null>(null);
   const [dragOverColumn, setDragOverColumn] = useState<string | null>(null);
+  
+  // Column width state for resizing
+  const [columnWidths, setColumnWidths] = useState<Map<string, number>>(new Map());
+  const [resizingColumn, setResizingColumn] = useState<string | null>(null);
+  const resizeStartX = useRef<number>(0);
+  const resizeStartWidth = useRef<number>(0);
+
+  // Helper function to get a unique key for a row based on delivery and all data
+  const getRowDataKey = (row: DataRow): string => {
+    const keys = Array.from(availableKeys).sort();
+    const values = keys.map(key => String(row[key] || '')).join('|');
+    return `${row.delivery}::${values}`;
+  };
+
+  // Column resizing handlers
+  const handleResizeStart = (e: React.MouseEvent, columnKey: string) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setResizingColumn(columnKey);
+    resizeStartX.current = e.clientX;
+    const currentWidth = columnWidths.get(columnKey) || 150;
+    resizeStartWidth.current = currentWidth;
+    
+    const handleMouseMove = (e: MouseEvent) => {
+      const diff = e.clientX - resizeStartX.current;
+      const newWidth = Math.max(50, resizeStartWidth.current + diff);
+      setColumnWidths(prev => {
+        const next = new Map(prev);
+        next.set(columnKey, newWidth);
+        return next;
+      });
+    };
+    
+    const handleMouseUp = () => {
+      setResizingColumn(null);
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+    
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+  };
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -409,6 +452,19 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
     setDragOverColumn(null);
   };
 
+  // Group rows by delivery and data to identify duplicates
+  const rowGroups = useMemo(() => {
+    const groups = new Map<string, number[]>();
+    data.forEach((row, index) => {
+      const key = getRowDataKey(row);
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key)!.push(index);
+    });
+    return groups;
+  }, [data, availableKeys]);
+
   // Apply filters first, then sort
   const filteredAndSortedData = useMemo(() => {
     let result = [...data];
@@ -504,17 +560,32 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
     return [...ordered, ...newColumns];
   }, [visibleColumns, availableKeys, columnOrder]);
 
-  // Filter columns based on search query
+  // Filter columns based on search query and sort: selected first, then unselected, both alphabetically
   const filteredColumns = useMemo(() => {
-    if (!columnSearchQuery.trim()) {
-      return dataColumns;
+    let filtered = dataColumns;
+    
+    // Apply search filter if query exists
+    if (columnSearchQuery.trim()) {
+      const query = columnSearchQuery.toLowerCase();
+      filtered = dataColumns.filter(col => 
+        col.label.toLowerCase().includes(query) || 
+        col.key.toLowerCase().includes(query)
+      );
     }
-    const query = columnSearchQuery.toLowerCase();
-    return dataColumns.filter(col => 
-      col.label.toLowerCase().includes(query) || 
-      col.key.toLowerCase().includes(query)
-    );
-  }, [dataColumns, columnSearchQuery]);
+    
+    // Sort: selected columns first, then unselected, both alphabetically
+    return filtered.sort((a, b) => {
+      const aSelected = visibleColumns.has(a.key);
+      const bSelected = visibleColumns.has(b.key);
+      
+      // If one is selected and the other isn't, selected comes first
+      if (aSelected && !bSelected) return -1;
+      if (!aSelected && bSelected) return 1;
+      
+      // Both are in the same group (both selected or both unselected), sort alphabetically
+      return a.label.localeCompare(b.label);
+    });
+  }, [dataColumns, columnSearchQuery, visibleColumns]);
 
   // Filter column values based on search query
   const getFilteredColumnValues = (columnKey: string): string[] => {
@@ -534,9 +605,87 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
     );
   }
 
+  const tableContainerRef = useRef<HTMLDivElement>(null);
+  const horizontalScrollbarRef = useRef<HTMLDivElement>(null);
+
+  // Sync horizontal scrollbar with table scroll and update scrollbar width
+  useEffect(() => {
+    const tableContainer = tableContainerRef.current;
+    const scrollbar = horizontalScrollbarRef.current;
+    
+    if (!tableContainer || !scrollbar) return;
+
+    const updateScrollbarWidth = () => {
+      const table = tableContainer.querySelector('table') as HTMLTableElement | null;
+      if (table && scrollbar) {
+        const scrollbarContent = scrollbar.querySelector('.horizontal-scrollbar-content') as HTMLElement | null;
+        if (scrollbarContent) {
+          scrollbarContent.style.width = `${table.scrollWidth}px`;
+        }
+      }
+    };
+
+    const handleScroll = () => {
+      if (scrollbar) {
+        scrollbar.scrollLeft = tableContainer.scrollLeft;
+      }
+    };
+
+    const handleScrollbarScroll = () => {
+      if (tableContainer) {
+        tableContainer.scrollLeft = scrollbar.scrollLeft;
+      }
+    };
+
+    // Handle wheel events for horizontal scrolling (trackpad and Shift+scroll)
+    const handleWheel = (e: WheelEvent) => {
+      // Check if we need to scroll horizontally
+      const shouldScrollHorizontally = 
+        e.shiftKey || // Shift + scroll (standard horizontal scroll)
+        Math.abs(e.deltaX) > Math.abs(e.deltaY); // Trackpad horizontal scroll
+      
+      if (shouldScrollHorizontally && tableContainer) {
+        // Prevent default vertical scrolling
+        e.preventDefault();
+        
+        // Calculate horizontal scroll amount
+        const scrollAmount = e.shiftKey ? e.deltaY : e.deltaX;
+        
+        // Apply horizontal scroll
+        tableContainer.scrollLeft += scrollAmount;
+      }
+    };
+
+    // Initial width update
+    updateScrollbarWidth();
+    
+    // Update on resize
+    const resizeObserver = new ResizeObserver(() => {
+      updateScrollbarWidth();
+    });
+    
+    const table = tableContainer.querySelector('table') as HTMLTableElement | null;
+    if (table) {
+      resizeObserver.observe(table);
+    }
+
+    tableContainer.addEventListener('scroll', handleScroll);
+    scrollbar.addEventListener('scroll', handleScrollbarScroll);
+    tableContainer.addEventListener('wheel', handleWheel, { passive: false });
+    scrollbar.addEventListener('wheel', handleWheel, { passive: false });
+
+    return () => {
+      tableContainer.removeEventListener('scroll', handleScroll);
+      scrollbar.removeEventListener('scroll', handleScrollbarScroll);
+      tableContainer.removeEventListener('wheel', handleWheel);
+      scrollbar.removeEventListener('wheel', handleWheel);
+      resizeObserver.disconnect();
+    };
+  }, [filteredAndSortedData, visibleColumnsArray, columnWidths]);
+
   return (
-    <div className="mt-6 bg-white dark:bg-gray-800 rounded-xl shadow-lg border border-gray-200 dark:border-gray-700 p-6">
-      <div className="mb-6 flex items-center justify-between flex-wrap gap-4">
+    <div className="h-screen w-screen flex flex-col bg-white dark:bg-gray-800 p-6">
+      <div className="mb-6 flex items-center justify-between flex-wrap gap-4 flex-shrink-0">
         <div>
           <h3 className="text-2xl font-bold text-gray-800 dark:text-gray-200 mb-1">Results</h3>
           <p className="text-sm text-gray-600 dark:text-gray-400">
@@ -547,7 +696,7 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
             {' '}out of <span className="font-semibold">{totalCount}</span> total
           </p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="relative">
             <button
               onClick={() => setShowColumnSelector(!showColumnSelector)}
@@ -678,8 +827,16 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
         </div>
       )}
 
-      <div className="overflow-x-auto rounded-lg border border-gray-200 dark:border-gray-700">
-        <table className="w-full border-collapse bg-white dark:bg-gray-800">
+      <div className="flex-1 flex flex-col relative overflow-hidden min-h-0">
+        {/* Table container with vertical scroll */}
+        <div 
+          ref={tableContainerRef}
+          className="flex-1 rounded-lg border border-gray-200 dark:border-gray-700 overflow-y-auto overflow-x-auto"
+          style={{ 
+            scrollbarWidth: 'thin'
+          }}
+        >
+        <table className="border-collapse bg-white dark:bg-gray-800" style={{ minWidth: '100%', borderSpacing: 0 }}>
           <thead>
             <tr className="bg-gradient-to-r from-gray-50 to-gray-100 dark:from-gray-700 dark:to-gray-800 border-b-2 border-gray-300 dark:border-gray-600">
               {visibleColumnsArray.map(key => {
@@ -699,15 +856,21 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                     onDragLeave={handleDragLeave}
                     onDrop={(e) => handleDrop(e, key)}
                     onDragEnd={handleDragEnd}
-                    className={`px-6 py-4 text-left text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider select-none relative transition-all ${
+                    style={{ 
+                      width: columnWidths.get(key) || 'auto',
+                      minWidth: columnWidths.get(key) || 150,
+                      position: 'relative',
+                      overflow: 'visible'
+                    }}
+                    className={`px-6 py-4 text-left text-xs font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wider select-none relative transition-all border-r border-gray-200 dark:border-gray-600 ${
                       isDragging ? 'opacity-50 cursor-grabbing' : 'cursor-grab'
                     } ${
                       isDragOver ? 'border-l-4 border-blue-500 dark:border-blue-400 bg-blue-50 dark:bg-blue-900/30 shadow-inner' : ''
                     }`}
                   >
-                    <div className="flex items-center gap-2">
+                    <div className="flex items-center gap-2" style={{ overflow: 'visible' }}>
                       <div
-                        className="cursor-move text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 transition-colors"
+                        className="cursor-move text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-400 transition-colors flex-shrink-0"
                         title="Drag to reorder column"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -720,12 +883,13 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                             handleSort(key);
                           }
                         }}
-                        className="flex items-center cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors flex-1"
+                        className="flex items-center cursor-pointer hover:text-blue-600 dark:hover:text-blue-400 transition-colors flex-1 min-w-0"
+                        style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}
                       >
-                        {getColumnLabel(key)}
+                        <span className="truncate">{getColumnLabel(key)}</span>
                         <SortIcon column={key} />
                       </div>
-                      <div className="relative">
+                      <div className="relative flex-shrink-0" style={{ overflow: 'visible' }}>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -753,14 +917,120 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                             ref={(el) => {
                               if (el) {
                                 filterDropdownRefs.current.set(key, el);
+                                // Position on mount/update
+                                setTimeout(() => {
+                                  const button = el.parentElement?.querySelector('button');
+                                  if (button) {
+                                    const buttonRect = button.getBoundingClientRect();
+                                    const viewportWidth = window.innerWidth;
+                                    const viewportHeight = window.innerHeight;
+                                    const popupWidth = 256; // w-64 = 256px
+                                    
+                                    // Find the next column's filter button to avoid overlap
+                                    const currentTh = button.closest('th');
+                                    const nextTh = currentTh?.nextElementSibling as HTMLElement | null;
+                                    const nextFilterButton = nextTh?.querySelector('button[title="Filter column"]') as HTMLElement | null;
+                                    const nextButtonRect = nextFilterButton?.getBoundingClientRect();
+                                    
+                                    const spaceOnRight = viewportWidth - buttonRect.right;
+                                    const spaceOnLeft = buttonRect.left;
+                                    
+                                    // Check if positioning to the right would overlap with next column's filter button
+                                    const wouldOverlapNextButton = nextButtonRect && 
+                                      (buttonRect.right + popupWidth > nextButtonRect.left - 10); // 10px margin
+                                    
+                                    // Horizontal positioning - prefer right, but avoid overlapping adjacent filter buttons
+                                    if (wouldOverlapNextButton) {
+                                      // Position to the left to avoid overlap
+                                      el.style.left = '0';
+                                      el.style.right = 'auto';
+                                    } else if (spaceOnRight >= popupWidth || (spaceOnRight >= spaceOnLeft && spaceOnRight >= 200)) {
+                                      el.style.left = 'auto';
+                                      el.style.right = '0';
+                                    } else {
+                                      el.style.left = '0';
+                                      el.style.right = 'auto';
+                                    }
+                                    
+                                    // Calculate available space for vertical positioning
+                                    const spaceBelow = viewportHeight - buttonRect.bottom;
+                                    const spaceAbove = buttonRect.top;
+                                    const popupMinHeight = 300;
+                                    const popupMaxHeight = 600;
+                                    const margin = 20; // Margin from viewport edges
+                                    
+                                    // Calculate how much space we actually need
+                                    const neededHeight = popupMinHeight + margin;
+                                    
+                                    // Vertical positioning - prefer below, but use above if not enough space
+                                    let positionAbove = false;
+                                    if (spaceBelow >= neededHeight || (spaceBelow >= spaceAbove && spaceBelow >= neededHeight)) {
+                                      // Position below
+                                      el.style.top = '100%';
+                                      el.style.bottom = 'auto';
+                                      el.style.marginTop = '0.5rem';
+                                      el.style.marginBottom = '0';
+                                      
+                                      // Calculate max height based on available space below
+                                      const availableHeight = spaceBelow - margin - 8; // 8px for margin-top
+                                      el.style.maxHeight = `${Math.max(popupMinHeight, Math.min(popupMaxHeight, availableHeight))}px`;
+                                    } else {
+                                      // Position above
+                                      positionAbove = true;
+                                      el.style.top = 'auto';
+                                      el.style.bottom = '100%';
+                                      el.style.marginTop = '0';
+                                      el.style.marginBottom = '0.5rem';
+                                      
+                                      // Calculate max height based on available space above
+                                      const availableHeight = spaceAbove - margin - 8; // 8px for margin-bottom
+                                      el.style.maxHeight = `${Math.max(popupMinHeight, Math.min(popupMaxHeight, availableHeight))}px`;
+                                    }
+                                    
+                                    // Ensure popup doesn't go off screen horizontally
+                                    const popupRect = el.getBoundingClientRect();
+                                    if (popupRect.left < 8) {
+                                      el.style.left = `${8 - buttonRect.left}px`;
+                                      el.style.right = 'auto';
+                                    }
+                                    if (popupRect.right > viewportWidth - 8) {
+                                      el.style.right = `${viewportWidth - buttonRect.right - 8}px`;
+                                      el.style.left = 'auto';
+                                    }
+                                    
+                                    // Final check: ensure popup doesn't go off screen vertically after positioning
+                                    setTimeout(() => {
+                                      const finalRect = el.getBoundingClientRect();
+                                      if (finalRect.bottom > viewportHeight - 8) {
+                                        const overflow = finalRect.bottom - (viewportHeight - 8);
+                                        if (!positionAbove) {
+                                          // If positioned below and overflowing, reduce max-height
+                                          const currentMaxHeight = parseFloat(el.style.maxHeight || `${popupMaxHeight}`);
+                                          el.style.maxHeight = `${Math.max(popupMinHeight, currentMaxHeight - overflow)}px`;
+                                        }
+                                      }
+                                      if (finalRect.top < 8) {
+                                        const overflow = 8 - finalRect.top;
+                                        if (positionAbove) {
+                                          // If positioned above and overflowing, reduce max-height
+                                          const currentMaxHeight = parseFloat(el.style.maxHeight || `${popupMaxHeight}`);
+                                          el.style.maxHeight = `${Math.max(popupMinHeight, currentMaxHeight - overflow)}px`;
+                                        }
+                                      }
+                                    }, 10);
+                                  }
+                                }, 0);
                               } else {
                                 filterDropdownRefs.current.delete(key);
                               }
                             }}
-                            className="absolute right-0 mt-2 w-64 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl z-50"
+                            className="absolute mt-2 w-64 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl z-[100] flex flex-col"
+                            style={{ 
+                              minHeight: '300px'
+                            }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <div className="p-4 border-b border-gray-200 dark:border-gray-700">
+                            <div className="p-4 border-b border-gray-200 dark:border-gray-700 flex-shrink-0">
                               <div className="flex items-center justify-between mb-3">
                                 <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300">
                                   Filter {getColumnLabel(key)}
@@ -806,7 +1076,7 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                                 {getFilteredColumnValues(key).length} of {uniqueValues.length} values
                               </div>
                             </div>
-                            <div className="max-h-64 overflow-y-auto p-2">
+                            <div className="flex-1 overflow-y-auto p-2 min-h-0">
                               {getFilteredColumnValues(key).length === 0 ? (
                                 <div className="text-center py-6 text-gray-500 dark:text-gray-400 text-sm">
                                   No values found
@@ -833,23 +1103,34 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                                 </div>
                               )}
                             </div>
-                            <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center">
+                            <div className="p-3 border-t border-gray-200 dark:border-gray-700 flex justify-between items-center flex-shrink-0 bg-white dark:bg-gray-800">
                               <div className="text-xs text-gray-500 dark:text-gray-400">
                                 {filterValues.size} selected
                               </div>
-                              <button
-                                onClick={() => {
-                                  const allValues = new Set(getUniqueColumnValues(key));
-                                  setColumnFilters(prev => {
-                                    const next = new Map(prev);
-                                    next.set(key, allValues);
-                                    return next;
-                                  });
-                                }}
-                                className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium"
-                              >
-                                Select All
-                              </button>
+                              <div className="flex items-center gap-2">
+                                <button
+                                  onClick={() => {
+                                    const allValues = new Set(getUniqueColumnValues(key));
+                                    setColumnFilters(prev => {
+                                      const next = new Map(prev);
+                                      next.set(key, allValues);
+                                      return next;
+                                    });
+                                  }}
+                                  className="text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 dark:hover:text-blue-300 font-medium"
+                                >
+                                  Select All
+                                </button>
+                                <button
+                                  onClick={() => {
+                                    setOpenFilterColumn(null);
+                                    setFilterSearchQuery('');
+                                  }}
+                                  className="px-3 py-1.5 bg-blue-600 dark:bg-blue-500 text-white rounded-lg text-xs font-medium hover:bg-blue-700 dark:hover:bg-blue-600 transition-colors"
+                                >
+                                  Done
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
@@ -858,16 +1139,34 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                     {hasFilter && (
                       <div className="absolute bottom-1 left-6 right-6 h-0.5 bg-blue-600 dark:bg-blue-400"></div>
                     )}
+                    {/* Resize handle */}
+                    <div
+                      onMouseDown={(e) => handleResizeStart(e, key)}
+                      className="absolute top-0 right-0 w-1 h-full cursor-col-resize hover:bg-blue-500 dark:hover:bg-blue-400 transition-colors z-10"
+                      style={{ 
+                        cursor: resizingColumn === key ? 'col-resize' : 'col-resize',
+                        backgroundColor: resizingColumn === key ? 'rgb(59 130 246)' : 'transparent'
+                      }}
+                      title="Drag to resize column"
+                    />
                   </th>
                 );
               })}
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-200 dark:divide-gray-700">
-            {filteredAndSortedData.map((row, index) => (
+            {filteredAndSortedData.map((row, index) => {
+              // Check if this row is a duplicate by comparing with all rows
+              const rowKey = getRowDataKey(row);
+              const duplicateGroup = rowGroups.get(rowKey);
+              const isDuplicate = duplicateGroup ? duplicateGroup.length > 1 : false;
+              
+              return (
               <tr
                 key={index}
-                className="transition-colors hover:bg-blue-50 dark:hover:bg-gray-700/50 even:bg-gray-50/50 dark:even:bg-gray-900/30"
+                className={`transition-colors hover:bg-blue-50 dark:hover:bg-gray-700/50 even:bg-gray-50/50 dark:even:bg-gray-900/30 ${
+                  isDuplicate ? 'bg-yellow-50 dark:bg-yellow-900/20 border-l-4 border-yellow-500 dark:border-yellow-400' : ''
+                }`}
               >
                 {visibleColumnsArray.map(key => {
                   const value = getCellValue(row, key);
@@ -877,7 +1176,14 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                   const isPendingLines = key === 'outboundPendingLines';
                   
                   return (
-                    <td key={key} className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300">
+                    <td 
+                      key={key} 
+                      className="px-6 py-4 whitespace-nowrap text-sm text-gray-700 dark:text-gray-300 border-r border-gray-200 dark:border-gray-600"
+                      style={{ 
+                        width: columnWidths.get(key) || 'auto',
+                        minWidth: columnWidths.get(key) || 150
+                      }}
+                    >
                       {isDelivery ? (
                         <span className="font-medium text-gray-900 dark:text-gray-200">{value}</span>
                       ) : isShipMethod ? (
@@ -903,9 +1209,31 @@ export function ResultsTable({ data, totalCount }: ResultsTableProps) {
                   );
                 })}
               </tr>
-            ))}
+            );
+            })}
           </tbody>
         </table>
+        </div>
+        
+        {/* Floating horizontal scrollbar - always visible */}
+        <div 
+          ref={horizontalScrollbarRef}
+          className="flex-shrink-0 h-4 mt-1 rounded-lg border border-gray-200 dark:border-gray-700 bg-gray-50 dark:bg-gray-900"
+          style={{
+            overflowX: 'scroll',
+            overflowY: 'hidden',
+            scrollbarWidth: 'thin',
+            scrollbarColor: 'rgb(203 213 225) rgb(241 245 249)'
+          }}
+        >
+          <div 
+            className="horizontal-scrollbar-content"
+            style={{ 
+              width: 'max-content',
+              height: '1px'
+            }}
+          />
+        </div>
       </div>
     </div>
   );
